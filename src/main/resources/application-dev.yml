@@ -1,0 +1,36 @@
+# Development Environment Configuration
+spring:
+  # H2 Database for Development
+  datasource:
+    url: jdbc:h2:mem:pvece_dev;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE
+    driver-class-name: org.h2.Driver
+    username: sa
+    password:
+
+  # Disable schema.sql execution (use JPA ddl-auto instead)
+  sql:
+    init:
+      mode: never
+
+  # H2 Console
+  h2:
+    console:
+      enabled: true
+      path: /h2-console
+
+  # JPA Configuration
+  jpa:
+    database-platform: org.hibernate.dialect.H2Dialect
+    hibernate:
+      ddl-auto: create-drop
+    show-sql: true
+    properties:
+      hibernate:
+        format_sql: true
+
+# Development Logging
+logging:
+  level:
+    com.lynkvertx: DEBUG
+    org.hibernate.SQL: DEBUG
+    org.hibernate.type.descriptor.sql.BasicBinder: TRACE
