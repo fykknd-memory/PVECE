@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS project (
     location_lat DECIMAL(10,7),
     location_lng DECIMAL(10,7),
     location_address VARCHAR(500),
+    transformer_capacity DECIMAL(10,2),
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME ON UPDATE CURRENT_TIMESTAMP,
     INDEX idx_project_name (name),
@@ -72,7 +73,12 @@ CREATE TABLE IF NOT EXISTS v2g_vehicle_config (
     project_id BIGINT NOT NULL,
     vehicle_count INT,
     battery_capacity_kwh DECIMAL(10,2),
+    enable_time_control TINYINT(1) DEFAULT 1,
     weekly_schedule JSON,
+    special_dates JSON,
+    fast_chargers INT,
+    slow_chargers INT,
+    ultra_fast_chargers INT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME ON UPDATE CURRENT_TIMESTAMP,
     CONSTRAINT fk_v2g_config_project FOREIGN KEY (project_id) REFERENCES project(id) ON DELETE CASCADE,
@@ -117,3 +123,34 @@ CREATE TABLE IF NOT EXISTS report (
     INDEX idx_report_project (project_id),
     INDEX idx_report_type (report_type)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Per-project Time-of-Use Electricity Prices
+CREATE TABLE IF NOT EXISTS project_electricity_price (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    project_id BIGINT NOT NULL,
+    country VARCHAR(10) NOT NULL DEFAULT 'CN',
+    province VARCHAR(50),
+    city VARCHAR(50),
+    period_type VARCHAR(20) NOT NULL,
+    time_ranges JSON,
+    price DECIMAL(10,4) NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME ON UPDATE CURRENT_TIMESTAMP,
+    CONSTRAINT fk_project_elec_price_project FOREIGN KEY (project_id) REFERENCES project(id) ON DELETE CASCADE,
+    INDEX idx_project_elec_price_project (project_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================
+-- ALTER TABLE statements for existing databases
+-- ============================
+-- Add transformer_capacity to project table if not exists
+-- MySQL does not support IF NOT EXISTS for columns, so use a safe approach:
+-- These statements can be run manually if tables already exist without the new columns.
+
+-- ALTER TABLE project ADD COLUMN transformer_capacity DECIMAL(10,2) AFTER location_address;
+-- ALTER TABLE v2g_vehicle_config ADD COLUMN enable_time_control TINYINT(1) DEFAULT 1 AFTER battery_capacity_kwh;
+-- ALTER TABLE v2g_vehicle_config DROP COLUMN min_soc;
+-- ALTER TABLE v2g_vehicle_config ADD COLUMN special_dates JSON AFTER weekly_schedule;
+-- ALTER TABLE v2g_vehicle_config ADD COLUMN fast_chargers INT AFTER special_dates;
+-- ALTER TABLE v2g_vehicle_config ADD COLUMN slow_chargers INT AFTER fast_chargers;
+-- ALTER TABLE v2g_vehicle_config ADD COLUMN ultra_fast_chargers INT AFTER slow_chargers;

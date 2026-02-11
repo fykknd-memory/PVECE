@@ -1,28 +1,23 @@
 # Development Environment Configuration
 spring:
-  # H2 Database for Development
+  # MySQL 8 Database for Development
   datasource:
-    url: jdbc:h2:mem:pvece_dev;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE
-    driver-class-name: org.h2.Driver
-    username: sa
-    password:
+    url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3306}/${DB_NAME:pvece}?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false&createDatabaseIfNotExist=true
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    username: ${DB_USERNAME:root}
+    password: ${DB_PASSWORD:root}
 
-  # Disable schema.sql execution (use JPA ddl-auto instead)
+  # Execute schema.sql on startup
   sql:
     init:
-      mode: never
-
-  # H2 Console
-  h2:
-    console:
-      enabled: true
-      path: /h2-console
+      mode: always
+      schema-locations: classpath:schema.sql
 
   # JPA Configuration
   jpa:
-    database-platform: org.hibernate.dialect.H2Dialect
+    database-platform: org.hibernate.dialect.MySQL8Dialect
     hibernate:
-      ddl-auto: create-drop
+      ddl-auto: none
     show-sql: true
     properties:
       hibernate:

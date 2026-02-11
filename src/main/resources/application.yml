@@ -25,3 +25,13 @@ logging:
     com.lynkvertx: DEBUG
     org.springframework.web: INFO
     org.hibernate.SQL: DEBUG
+
+# Energy Storage Calculation Configuration
+pvece:
+  calculation:
+    storage:
+      empirical-coefficient: 0.8
+      default-charging-power-kw: 7
+      time-slot-interval-minutes: 15
+      ess-unit-cost-yuan-per-kwh: 1500
+      ess-annual-maintenance-ratio: 0.02

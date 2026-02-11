@@ -32,6 +32,8 @@ public class ProjectDTO {
     @Size(max = 500, message = "Location address must not exceed 500 characters")
     private String locationAddress;
 
+    private BigDecimal transformerCapacity;
+
     private LocalDateTime createdAt;
 
     private LocalDateTime updatedAt;

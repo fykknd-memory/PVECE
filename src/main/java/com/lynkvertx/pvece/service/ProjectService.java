@@ -65,6 +65,7 @@ public class ProjectService {
         existing.setLocationLat(dto.getLocationLat());
         existing.setLocationLng(dto.getLocationLng());
         existing.setLocationAddress(dto.getLocationAddress());
+        existing.setTransformerCapacity(dto.getTransformerCapacity());
 
         Project saved = projectRepository.save(existing);
         log.info("Updated project with id: {}", saved.getId());
@@ -93,6 +94,7 @@ public class ProjectService {
             .locationLat(entity.getLocationLat())
             .locationLng(entity.getLocationLng())
             .locationAddress(entity.getLocationAddress())
+            .transformerCapacity(entity.getTransformerCapacity())
             .createdAt(entity.getCreatedAt())
             .updatedAt(entity.getUpdatedAt())
             .build();
@@ -107,6 +109,7 @@ public class ProjectService {
             .locationLat(dto.getLocationLat())
             .locationLng(dto.getLocationLng())
             .locationAddress(dto.getLocationAddress())
+            .transformerCapacity(dto.getTransformerCapacity())
             .build();
     }
 }

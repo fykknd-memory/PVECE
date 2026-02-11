@@ -39,6 +39,9 @@ public class Project {
     @Column(name = "location_address", length = 500)
     private String locationAddress;
 
+    @Column(name = "transformer_capacity", precision = 10, scale = 2)
+    private BigDecimal transformerCapacity;
+
     @CreationTimestamp
     @Column(name = "created_at", updatable = false)
     private LocalDateTime createdAt;
