@@ -64,10 +64,33 @@ public class StorageCalculationResultDTO {
 
     @Data
     @NoArgsConstructor
-    @AllArgsConstructor
     public static class LoadCurvePoint {
         private String timeSlot;    // HH:mm
-        private BigDecimal powerKw;
+        private BigDecimal powerKw;            // Rated instantaneous power when active (kW)
+        private BigDecimal dischargePowerKw;   // Rated discharge power (negative, kW)
+        private BigDecimal energyKwh;          // Actual charging energy this slot (kWh, null = powerKw × interval)
+        private BigDecimal dischargeEnergyKwh; // Actual discharge energy this slot (negative kWh, null = dischargePowerKw × interval)
+
+        public LoadCurvePoint(String timeSlot, BigDecimal powerKw) {
+            this.timeSlot = timeSlot;
+            this.powerKw = powerKw;
+            this.dischargePowerKw = BigDecimal.ZERO;
+        }
+
+        public LoadCurvePoint(String timeSlot, BigDecimal powerKw, BigDecimal dischargePowerKw) {
+            this.timeSlot = timeSlot;
+            this.powerKw = powerKw;
+            this.dischargePowerKw = dischargePowerKw != null ? dischargePowerKw : BigDecimal.ZERO;
+        }
+
+        public LoadCurvePoint(String timeSlot, BigDecimal powerKw, BigDecimal dischargePowerKw,
+                              BigDecimal energyKwh, BigDecimal dischargeEnergyKwh) {
+            this.timeSlot = timeSlot;
+            this.powerKw = powerKw;
+            this.dischargePowerKw = dischargePowerKw != null ? dischargePowerKw : BigDecimal.ZERO;
+            this.energyKwh = energyKwh;
+            this.dischargeEnergyKwh = dischargeEnergyKwh;
+        }
     }
 
     @Data

@@ -35,3 +35,6 @@ pvece:
       time-slot-interval-minutes: 15
       ess-unit-cost-yuan-per-kwh: 1500
       ess-annual-maintenance-ratio: 0.02
+      v2g-round-trip-efficiency: 0.85
+      v2g-discharge-depth-percent: 0.20
+      v2g-discharge-power-derate-factor: 0.85

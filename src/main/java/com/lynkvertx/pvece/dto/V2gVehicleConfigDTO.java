@@ -31,6 +31,11 @@ public class V2gVehicleConfigDTO {
     private Integer slowChargers;
     private Integer ultraFastChargers;
 
+    /** V2G-enabled pile counts (subset of total) */
+    private Integer fastChargersV2g;
+    private Integer slowChargersV2g;
+    private Integer ultraFastChargersV2g;
+
     /**
      * A chargeable time range within a day (HH:mm start/end)
      */

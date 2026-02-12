@@ -79,6 +79,9 @@ CREATE TABLE IF NOT EXISTS v2g_vehicle_config (
     fast_chargers INT,
     slow_chargers INT,
     ultra_fast_chargers INT,
+    fast_chargers_v2g INT DEFAULT 0,
+    slow_chargers_v2g INT DEFAULT 0,
+    ultra_fast_chargers_v2g INT DEFAULT 0,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME ON UPDATE CURRENT_TIMESTAMP,
     CONSTRAINT fk_v2g_config_project FOREIGN KEY (project_id) REFERENCES project(id) ON DELETE CASCADE,
@@ -154,3 +157,6 @@ CREATE TABLE IF NOT EXISTS project_electricity_price (
 -- ALTER TABLE v2g_vehicle_config ADD COLUMN fast_chargers INT AFTER special_dates;
 -- ALTER TABLE v2g_vehicle_config ADD COLUMN slow_chargers INT AFTER fast_chargers;
 -- ALTER TABLE v2g_vehicle_config ADD COLUMN ultra_fast_chargers INT AFTER slow_chargers;
+-- ALTER TABLE v2g_vehicle_config ADD COLUMN fast_chargers_v2g INT DEFAULT 0 AFTER ultra_fast_chargers;
+-- ALTER TABLE v2g_vehicle_config ADD COLUMN slow_chargers_v2g INT DEFAULT 0 AFTER fast_chargers_v2g;
+-- ALTER TABLE v2g_vehicle_config ADD COLUMN ultra_fast_chargers_v2g INT DEFAULT 0 AFTER slow_chargers_v2g;

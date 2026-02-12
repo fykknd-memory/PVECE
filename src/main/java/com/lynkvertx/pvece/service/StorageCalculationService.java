@@ -9,6 +9,8 @@ import com.lynkvertx.pvece.dto.StorageCalculationRequestDTO;
 import com.lynkvertx.pvece.dto.StorageCalculationResultDTO;
 import com.lynkvertx.pvece.dto.StorageCalculationResultDTO.LoadCurvePoint;
 import com.lynkvertx.pvece.dto.StorageCalculationResultDTO.YearlyEconomicIndicator;
+import com.lynkvertx.pvece.dto.V2gCalculationRequestDTO;
+import com.lynkvertx.pvece.dto.V2gCalculationResultDTO;
 import com.lynkvertx.pvece.dto.V2gVehicleConfigDTO;
 import com.lynkvertx.pvece.entity.Project;
 import com.lynkvertx.pvece.entity.ProjectElectricityPrice;
@@ -82,6 +84,11 @@ public class StorageCalculationService {
         int fastChargers = v2gEntity.getFastChargers() != null ? v2gEntity.getFastChargers() : 0;
         int slowChargers = v2gEntity.getSlowChargers() != null ? v2gEntity.getSlowChargers() : 0;
         int ultraFastChargers = v2gEntity.getUltraFastChargers() != null ? v2gEntity.getUltraFastChargers() : 0;
+        int fastChargersV2g = v2gEntity.getFastChargersV2g() != null ? v2gEntity.getFastChargersV2g() : 0;
+        int slowChargersV2g = v2gEntity.getSlowChargersV2g() != null ? v2gEntity.getSlowChargersV2g() : 0;
+        int ultraFastChargersV2g = v2gEntity.getUltraFastChargersV2g() != null ? v2gEntity.getUltraFastChargersV2g() : 0;
+        int totalV2gPiles = fastChargersV2g + slowChargersV2g + ultraFastChargersV2g;
+        boolean v2gEnabled = totalV2gPiles > 0;
 
         // Calculate total charging power from pile configuration (capped by vehicle count)
         BigDecimal totalChargingPowerKw = calculateTotalChargingPower(fastChargers, slowChargers, ultraFastChargers, vehicleCount);
@@ -95,7 +102,50 @@ public class StorageCalculationService {
             Math.min(vehicleCount, fastChargers + slowChargers + ultraFastChargers),
             totalChargingPowerKw.doubleValue()));
 
-        // Calculate per-day load curves
+        if (v2gEnabled) {
+            steps.add(String.format("Step 2-V2G: V2G piles — fast:%d slow:%d ultra:%d, total V2G piles=%d",
+                fastChargersV2g, slowChargersV2g, ultraFastChargersV2g, totalV2gPiles));
+
+            BigDecimal v2gDischargePowerKw = calculateTotalV2gDischargePower(
+                fastChargersV2g, slowChargersV2g, ultraFastChargersV2g, vehicleCount, null);
+            BigDecimal v2gChargePowerKw = calculateTotalChargingPower(
+                fastChargersV2g, slowChargersV2g, ultraFastChargersV2g, vehicleCount);
+            // V1G piles: total minus V2G
+            BigDecimal v1gChargePowerKw = calculateTotalChargingPower(
+                fastChargers - fastChargersV2g, slowChargers - slowChargersV2g,
+                ultraFastChargers - ultraFastChargersV2g,
+                Math.max(0, vehicleCount - totalV2gPiles));
+
+            DailyLoadCurveResult curveResult = calculateLoadCurveWithV2g(
+                weeklySchedule, touPrices, vehicleCount, batteryCapacityKwh, enableTimeControl,
+                v1gChargePowerKw, v2gChargePowerKw, v2gDischargePowerKw,
+                totalV2gPiles, steps
+            );
+
+            BigDecimal dailyArbitrage = curveResult.maxDailyArbitrage;
+
+            steps.add(String.format("Step 3: Load curve peak charge power = %.2fkW", curveResult.peakPowerKw.doubleValue()));
+            steps.add(String.format("Step 3a: Daily max energy consumption = %.2fkWh", curveResult.dailyMaxEnergyKwh.doubleValue()));
+            steps.add(String.format("Step 3b: V2G daily arbitrage revenue = %.2f元", dailyArbitrage.doubleValue()));
+
+            // Peak discharge power = rated V2G pile capability, not curve-derived
+            BigDecimal peakDischarge = v2gDischargePowerKw;
+            BigDecimal dailyDischargeEnergy = calculateDailyDischargeEnergy(curveResult.dailyCurves);
+
+            return LoadCurveResultDTO.builder()
+                .loadCurve(curveResult.maxEnvelopeCurve)
+                .dailyLoadCurves(curveResult.dailyCurves)
+                .peakPowerKw(curveResult.peakPowerKw)
+                .dailyEnergyKwh(curveResult.dailyMaxEnergyKwh)
+                .dailyDischargeEnergyKwh(dailyDischargeEnergy)
+                .peakDischargePowerKw(peakDischarge)
+                .dailyArbitrageRevenue(dailyArbitrage)
+                .v2gEnabled(true)
+                .calculationSteps(steps)
+                .build();
+        }
+
+        // V1G-only path (unchanged)
         DailyLoadCurveResult curveResult = calculateLoadCurve(
             weeklySchedule, touPrices, vehicleCount, batteryCapacityKwh, enableTimeControl, totalChargingPowerKw, steps
         );
@@ -108,6 +158,7 @@ public class StorageCalculationService {
             .dailyLoadCurves(curveResult.dailyCurves)
             .peakPowerKw(curveResult.peakPowerKw)
             .dailyEnergyKwh(curveResult.dailyMaxEnergyKwh)
+            .v2gEnabled(false)
             .calculationSteps(steps)
             .build();
     }
@@ -552,14 +603,21 @@ public class StorageCalculationService {
         // Fill cheapest slots until daily energy demand is met
         BigDecimal remainingEnergy = dailyEnergyKwh;
         BigDecimal[] slotPower = new BigDecimal[slotsPerDay];
+        BigDecimal[] slotEnergy = new BigDecimal[slotsPerDay];
         Arrays.fill(slotPower, BigDecimal.ZERO);
+        Arrays.fill(slotEnergy, BigDecimal.ZERO);
+
+        // Rated power = max energy per slot / interval (chargers run at full rated power)
+        BigDecimal ratedPower = maxEnergyPerSlot.compareTo(BigDecimal.ZERO) > 0
+            ? maxEnergyPerSlot.divide(intervalHours, 2, RoundingMode.HALF_UP)
+            : BigDecimal.ZERO;
 
         for (SlotData slot : chargeableSlots) {
             if (remainingEnergy.compareTo(BigDecimal.ZERO) <= 0) break;
 
             BigDecimal energyThisSlot = remainingEnergy.min(maxEnergyPerSlot);
-            BigDecimal powerThisSlot = energyThisSlot.divide(intervalHours, 2, RoundingMode.HALF_UP);
-            slotPower[slot.index] = powerThisSlot;
+            slotPower[slot.index] = ratedPower;     // rated power (charger at full power)
+            slotEnergy[slot.index] = energyThisSlot; // actual energy (may be less for last slot)
             remainingEnergy = remainingEnergy.subtract(energyThisSlot);
         }
 
@@ -568,7 +626,7 @@ public class StorageCalculationService {
         for (int i = 0; i < slotsPerDay; i++) {
             curve.add(new LoadCurvePoint(
                 slotIndexToTime(i, config.getTimeSlotIntervalMinutes()),
-                slotPower[i]
+                slotPower[i], BigDecimal.ZERO, slotEnergy[i], BigDecimal.ZERO
             ));
         }
         return curve;
@@ -583,7 +641,12 @@ public class StorageCalculationService {
             .divide(new BigDecimal("60"), 4, RoundingMode.HALF_UP);
         BigDecimal total = BigDecimal.ZERO;
         for (LoadCurvePoint point : loadCurve) {
-            total = total.add(point.getPowerKw().multiply(intervalHours));
+            // Use actual energy if available (powerKw may be rated power, not time-averaged)
+            if (point.getEnergyKwh() != null && point.getEnergyKwh().compareTo(BigDecimal.ZERO) > 0) {
+                total = total.add(point.getEnergyKwh());
+            } else {
+                total = total.add(point.getPowerKw().multiply(intervalHours));
+            }
         }
         return total.setScale(2, RoundingMode.HALF_UP);
     }
@@ -834,6 +897,600 @@ public class StorageCalculationService {
         return indicators;
     }
 
+    // ==================== V2G calculation methods ====================
+
+    /**
+     * Calculate total V2G discharge power, applying the derate factor.
+     * Same pile selection logic as charging but multiplied by derate.
+     *
+     * @param derateFactor Discharge power ratio (e.g. 0.85 = 85% of charge power). If null, uses config default.
+     */
+    BigDecimal calculateTotalV2gDischargePower(int fastV2g, int slowV2g, int ultraFastV2g, int vehicleCount,
+                                                BigDecimal derateFactor) {
+        BigDecimal chargePower = calculateTotalChargingPower(fastV2g, slowV2g, ultraFastV2g, vehicleCount);
+        BigDecimal factor = derateFactor != null ? derateFactor : config.getV2gDischargePowerDerateFactor();
+        return chargePower.multiply(factor).setScale(2, RoundingMode.HALF_UP);
+    }
+
+    /**
+     * Suggest pile configuration based on vehicle count using configurable ratios.
+     * Returns int[3]: {fast, slow, ultraFast}
+     */
+    public int[] suggestPileConfiguration(int vehicleCount) {
+        double[] ratios = config.getPileSuggestionRatios();
+        int fast = (int) Math.ceil(vehicleCount * ratios[0]);
+        int slow = (int) Math.ceil(vehicleCount * ratios[1]);
+        int ultra = (int) Math.ceil(vehicleCount * ratios[2]);
+        return new int[]{fast, slow, ultra};
+    }
+
+    /**
+     * Calculate load curve with V2G support using per-range SOC tracking.
+     *
+     * Each chargeable range has its own minSoc target. V2G vehicles track SOC across ranges:
+     * - If arrivalSoc > targetSoc: discharge headroom (arrivalSoc - targetSoc) at expensive slots
+     * - If arrivalSoc < targetSoc: charge deficit at cheapest slots
+     * - No global recharge step — SOC naturally cycles through ranges
+     *
+     * V1G vehicles use the existing global greedy algorithm (charge to max minSoc).
+     */
+    DailyLoadCurveResult calculateLoadCurveWithV2g(
+        List<V2gVehicleConfigDTO.WeeklyScheduleEntry> weeklySchedule,
+        List<TouPricePeriod> touPrices,
+        int vehicleCount,
+        BigDecimal batteryKwh,
+        boolean enableTimeControl,
+        BigDecimal v1gChargePowerKw,
+        BigDecimal v2gChargePowerKw,
+        BigDecimal v2gDischargePowerKw,
+        int totalV2gPiles,
+        List<String> steps
+    ) {
+        int slotsPerDay = 24 * 60 / config.getTimeSlotIntervalMinutes();
+        int intervalMin = config.getTimeSlotIntervalMinutes();
+        int v2gVehicleCount = Math.min(totalV2gPiles, vehicleCount);
+        int v1gVehicleCount = vehicleCount - v2gVehicleCount;
+
+        // Collect effective minSoc for V1G (max across all ranges)
+        int effectiveMinSocPercent = 80;
+        List<Integer> rangeMinSocs = new ArrayList<>();
+        if (weeklySchedule != null) {
+            for (V2gVehicleConfigDTO.WeeklyScheduleEntry entry : weeklySchedule) {
+                if (entry.isOperating() && entry.getChargeableRanges() != null) {
+                    for (V2gVehicleConfigDTO.TimeRange range : entry.getChargeableRanges()) {
+                        if (range.getMinSoc() != null && range.getMinSoc() > 0) {
+                            rangeMinSocs.add(range.getMinSoc());
+                        }
+                    }
+                }
+            }
+        }
+        if (!rangeMinSocs.isEmpty()) {
+            effectiveMinSocPercent = Collections.max(rangeMinSocs);
+        }
+
+        BigDecimal socRange = new BigDecimal(effectiveMinSocPercent)
+            .divide(new BigDecimal("100"), 4, RoundingMode.HALF_UP);
+        BigDecimal intervalHours = new BigDecimal(intervalMin)
+            .divide(new BigDecimal("60"), 4, RoundingMode.HALF_UP);
+
+        // V1G energy demand (global, using max minSoc)
+        BigDecimal v1gEnergyDemand = batteryKwh.multiply(socRange).multiply(new BigDecimal(v1gVehicleCount));
+        BigDecimal v1gMaxEnergyPerSlot = v1gChargePowerKw.multiply(intervalHours);
+        BigDecimal v2gMaxChargePerSlot = v2gChargePowerKw.multiply(intervalHours);
+        BigDecimal v2gMaxDischargePerSlot = v2gDischargePowerKw.multiply(intervalHours);
+
+        if (steps != null) {
+            steps.add(String.format("Step 2b-V2G: V1G vehicles=%d, V2G vehicles=%d, V1G target SOC=%d%%",
+                v1gVehicleCount, v2gVehicleCount, effectiveMinSocPercent));
+            steps.add(String.format("Step 2c-V2G: V1G charge demand=%.2fkWh, V1G power=%.0fkW",
+                v1gEnergyDemand.doubleValue(), v1gChargePowerKw.doubleValue()));
+            steps.add(String.format("Step 2d-V2G: V2G charge power=%.0fkW, V2G discharge power=%.0fkW",
+                v2gChargePowerKw.doubleValue(), v2gDischargePowerKw.doubleValue()));
+        }
+
+        String[] dayNames = {"周一", "周二", "周三", "周四", "周五", "周六", "周日"};
+        Map<String, List<LoadCurvePoint>> dailyCurves = new LinkedHashMap<>();
+        BigDecimal maxDailyArbitrage = BigDecimal.ZERO;
+        BigDecimal weeklyArbitrageSum = BigDecimal.ZERO;
+
+        if (!enableTimeControl) {
+            // No time control: single range covering the full day, default 80% SOC
+            Set<Integer> allSlots = new HashSet<>();
+            for (int i = 0; i < slotsPerDay; i++) allSlots.add(i);
+            List<RangeInfo> fullDayRange = new ArrayList<>();
+            fullDayRange.add(new RangeInfo(0, slotsPerDay - 1, 80, "00:00", "23:45"));
+
+            V2gDayCurveResult dayResult = calculateSingleDayCurveWithV2g(
+                allSlots, fullDayRange, touPrices,
+                v1gEnergyDemand, v1gMaxEnergyPerSlot,
+                v2gVehicleCount, v2gChargePowerKw, v2gDischargePowerKw,
+                v2gMaxChargePerSlot, v2gMaxDischargePerSlot,
+                batteryKwh, intervalHours, slotsPerDay, steps, "全天");
+            for (String dayName : dayNames) {
+                dailyCurves.put(dayName, dayResult.curve);
+            }
+            maxDailyArbitrage = dayResult.dailyArbitrage;
+            weeklyArbitrageSum = dayResult.dailyArbitrage.multiply(new BigDecimal("7"));
+        } else {
+            if (weeklySchedule != null && !weeklySchedule.isEmpty()) {
+                for (int dayIdx = 0; dayIdx < weeklySchedule.size() && dayIdx < 7; dayIdx++) {
+                    V2gVehicleConfigDTO.WeeklyScheduleEntry entry = weeklySchedule.get(dayIdx);
+                    String dayName = dayNames[dayIdx];
+                    if (!entry.isOperating()) continue;
+
+                    // Build per-range info AND flat slot set for V1G
+                    Set<Integer> daySlots = new HashSet<>();
+                    List<RangeInfo> dayRanges = new ArrayList<>();
+                    if (entry.getChargeableRanges() != null) {
+                        for (V2gVehicleConfigDTO.TimeRange range : entry.getChargeableRanges()) {
+                            if (range.getStart() != null && range.getEnd() != null
+                                && !range.getStart().isEmpty() && !range.getEnd().isEmpty()) {
+                                int fromSlot = timeToSlotIndex(range.getStart(), intervalMin);
+                                int toSlot = timeToSlotIndex(range.getEnd(), intervalMin);
+                                addSlotsInRange(daySlots, fromSlot, toSlot, slotsPerDay);
+                                int minSoc = range.getMinSoc() != null && range.getMinSoc() > 0
+                                    ? range.getMinSoc() : 80;
+                                dayRanges.add(new RangeInfo(fromSlot, toSlot, minSoc,
+                                    range.getStart(), range.getEnd()));
+                            }
+                        }
+                    }
+
+                    if (daySlots.isEmpty()) {
+                        List<LoadCurvePoint> zeroCurve = new ArrayList<>();
+                        for (int i = 0; i < slotsPerDay; i++) {
+                            zeroCurve.add(new LoadCurvePoint(
+                                slotIndexToTime(i, intervalMin),
+                                BigDecimal.ZERO, BigDecimal.ZERO));
+                        }
+                        dailyCurves.put(dayName, zeroCurve);
+                    } else {
+                        // Sort ranges by start slot for temporal ordering
+                        dayRanges.sort(Comparator.comparingInt(r -> r.startSlot));
+
+                        V2gDayCurveResult dayResult = calculateSingleDayCurveWithV2g(
+                            daySlots, dayRanges, touPrices,
+                            v1gEnergyDemand, v1gMaxEnergyPerSlot,
+                            v2gVehicleCount, v2gChargePowerKw, v2gDischargePowerKw,
+                            v2gMaxChargePerSlot, v2gMaxDischargePerSlot,
+                            batteryKwh, intervalHours, slotsPerDay, steps, dayName);
+                        dailyCurves.put(dayName, dayResult.curve);
+                        weeklyArbitrageSum = weeklyArbitrageSum.add(dayResult.dailyArbitrage);
+                        if (dayResult.dailyArbitrage.compareTo(maxDailyArbitrage) > 0) {
+                            maxDailyArbitrage = dayResult.dailyArbitrage;
+                        }
+                    }
+                }
+            }
+
+            if (dailyCurves.isEmpty()) {
+                List<LoadCurvePoint> zeroCurve = new ArrayList<>();
+                for (int i = 0; i < slotsPerDay; i++) {
+                    zeroCurve.add(new LoadCurvePoint(
+                        slotIndexToTime(i, intervalMin),
+                        BigDecimal.ZERO, BigDecimal.ZERO));
+                }
+                return new DailyLoadCurveResult(dailyCurves, zeroCurve, BigDecimal.ZERO, BigDecimal.ZERO);
+            }
+        }
+
+        // Compute max envelope (both charge and discharge)
+        List<LoadCurvePoint> maxEnvelope = new ArrayList<>();
+        for (int i = 0; i < slotsPerDay; i++) {
+            BigDecimal maxCharge = BigDecimal.ZERO;
+            BigDecimal minDischarge = BigDecimal.ZERO; // most negative = max discharge
+            for (List<LoadCurvePoint> dayCurve : dailyCurves.values()) {
+                if (i < dayCurve.size()) {
+                    LoadCurvePoint p = dayCurve.get(i);
+                    if (p.getPowerKw().compareTo(maxCharge) > 0) maxCharge = p.getPowerKw();
+                    BigDecimal discharge = p.getDischargePowerKw() != null ? p.getDischargePowerKw() : BigDecimal.ZERO;
+                    if (discharge.compareTo(minDischarge) < 0) minDischarge = discharge; // more negative = larger discharge
+                }
+            }
+            maxEnvelope.add(new LoadCurvePoint(
+                slotIndexToTime(i, config.getTimeSlotIntervalMinutes()), maxCharge, minDischarge));
+        }
+
+        BigDecimal peakPowerKw = findPeakPower(maxEnvelope);
+        BigDecimal dailyMaxEnergy = BigDecimal.ZERO;
+        for (List<LoadCurvePoint> dayCurve : dailyCurves.values()) {
+            BigDecimal dayEnergy = calculateDailyEnergy(dayCurve);
+            if (dayEnergy.compareTo(dailyMaxEnergy) > 0) dailyMaxEnergy = dayEnergy;
+        }
+
+        return new DailyLoadCurveResult(dailyCurves, maxEnvelope, peakPowerKw, dailyMaxEnergy, maxDailyArbitrage, weeklyArbitrageSum);
+    }
+
+    /**
+     * Calculate a single day's load curve with V2G per-range SOC tracking.
+     *
+     * Algorithm:
+     * 1. V1G vehicles: global greedy cheapest-first across all chargeable slots (unchanged)
+     * 2. V2G vehicles: per-range processing in temporal order
+     *    - Steady state initial SOC = last range's minSoc
+     *    - For each range: if arrivalSoc > targetSoc → discharge headroom at expensive slots
+     *    - If arrivalSoc < targetSoc → charge at cheapest slots in the range
+     *    - Arbitrage = total discharge revenue - total V2G charge cost
+     */
+    private V2gDayCurveResult calculateSingleDayCurveWithV2g(
+        Set<Integer> chargeableSlotSet,
+        List<RangeInfo> ranges,
+        List<TouPricePeriod> touPrices,
+        BigDecimal v1gEnergyDemand,
+        BigDecimal v1gMaxEnergyPerSlot,
+        int v2gVehicleCount,
+        BigDecimal v2gChargePowerKw,
+        BigDecimal v2gDischargePowerKw,
+        BigDecimal v2gMaxChargePerSlot,
+        BigDecimal v2gMaxDischargePerSlot,
+        BigDecimal batteryKwh,
+        BigDecimal intervalHours,
+        int slotsPerDay,
+        List<String> steps,
+        String dayLabel
+    ) {
+        int intervalMin = config.getTimeSlotIntervalMinutes();
+        BigDecimal BD_100 = new BigDecimal("100");
+
+        // Build all slot data
+        List<SlotData> allSlots = new ArrayList<>();
+        for (int i = 0; i < slotsPerDay; i++) {
+            String timeStr = slotIndexToTime(i, intervalMin);
+            BigDecimal price = getTouPriceForSlot(timeStr, touPrices);
+            boolean chargeable = chargeableSlotSet.contains(i);
+            allSlots.add(new SlotData(i, timeStr, price, chargeable));
+        }
+
+        BigDecimal[] v1gPower = new BigDecimal[slotsPerDay];
+        BigDecimal[] v2gChargePwr = new BigDecimal[slotsPerDay];
+        BigDecimal[] v2gDischargePwr = new BigDecimal[slotsPerDay];
+        // Energy arrays: track actual kWh per slot (separate from rated power)
+        BigDecimal[] v1gEnergy = new BigDecimal[slotsPerDay];
+        BigDecimal[] v2gChargeEnergy = new BigDecimal[slotsPerDay];
+        BigDecimal[] v2gDischargeEnergy = new BigDecimal[slotsPerDay];
+        Arrays.fill(v1gPower, BigDecimal.ZERO);
+        Arrays.fill(v2gChargePwr, BigDecimal.ZERO);
+        Arrays.fill(v2gDischargePwr, BigDecimal.ZERO);
+        Arrays.fill(v1gEnergy, BigDecimal.ZERO);
+        Arrays.fill(v2gChargeEnergy, BigDecimal.ZERO);
+        Arrays.fill(v2gDischargeEnergy, BigDecimal.ZERO);
+
+        // ---- V1G: unchanged global greedy ----
+        List<SlotData> v1gCheapSlots = allSlots.stream()
+            .filter(s -> s.chargeable)
+            .sorted(Comparator.comparing(s -> s.price))
+            .collect(Collectors.toList());
+
+        // V1G rated power = maxEnergyPerSlot / intervalH (chargers always run at rated power)
+        BigDecimal v1gRatedPower = v1gMaxEnergyPerSlot.compareTo(BigDecimal.ZERO) > 0
+            ? v1gMaxEnergyPerSlot.divide(intervalHours, 2, RoundingMode.HALF_UP)
+            : BigDecimal.ZERO;
+        BigDecimal remaining = v1gEnergyDemand;
+        for (SlotData slot : v1gCheapSlots) {
+            if (remaining.compareTo(BigDecimal.ZERO) <= 0) break;
+            BigDecimal energy = remaining.min(v1gMaxEnergyPerSlot);
+            // Power = rated pile power (not energy/interval) — charger runs at full power for shorter time
+            v1gPower[slot.index] = v1gRatedPower;
+            v1gEnergy[slot.index] = energy;  // actual energy (may be < ratedPower × interval for last slot)
+            remaining = remaining.subtract(energy);
+        }
+
+        // ---- V2G: per-range SOC tracking ----
+        if (v2gVehicleCount > 0 && !ranges.isEmpty()) {
+            // Steady state: initial SOC = last range's departure minSoc
+            int v2gSocPercent = ranges.get(ranges.size() - 1).minSocPercent;
+            BigDecimal totalDischargeRevenue = BigDecimal.ZERO;
+            BigDecimal totalChargeCost = BigDecimal.ZERO;
+
+            if (steps != null) {
+                steps.add(String.format("  [%s] V2G per-range: %d ranges, initial SOC=%d%% (steady state from last range)",
+                    dayLabel, ranges.size(), v2gSocPercent));
+            }
+
+            for (RangeInfo range : ranges) {
+                int arrivalSoc = v2gSocPercent;
+                int targetSoc = range.minSocPercent;
+
+                // Build slot list for this range
+                Set<Integer> rangeSlotSet = new HashSet<>();
+                addSlotsInRange(rangeSlotSet, range.startSlot, range.endSlot, slotsPerDay);
+                List<SlotData> rangeSlots = allSlots.stream()
+                    .filter(s -> rangeSlotSet.contains(s.index))
+                    .collect(Collectors.toList());
+
+                if (arrivalSoc > targetSoc) {
+                    // Discharge headroom: (arrivalSoc - targetSoc)% × batteryKwh × vehicles
+                    BigDecimal dischargeEnergy = batteryKwh
+                        .multiply(new BigDecimal(arrivalSoc - targetSoc))
+                        .divide(BD_100, 4, RoundingMode.HALF_UP)
+                        .multiply(new BigDecimal(v2gVehicleCount));
+
+                    // Discharge at most expensive slots in this range
+                    List<SlotData> expensiveSlots = rangeSlots.stream()
+                        .sorted(Comparator.comparing((SlotData s) -> s.price).reversed())
+                        .collect(Collectors.toList());
+
+                    remaining = dischargeEnergy;
+                    BigDecimal rangeRevenue = BigDecimal.ZERO;
+                    int dischargeSlotsUsed = 0;
+
+                    for (SlotData slot : expensiveSlots) {
+                        if (remaining.compareTo(BigDecimal.ZERO) <= 0) break;
+                        BigDecimal energy = remaining.min(v2gMaxDischargePerSlot);
+                        // Power = rated discharge power (negative), not energy/interval
+                        BigDecimal slotPower = v2gDischargePowerKw.negate();
+                        v2gDischargePwr[slot.index] = v2gDischargePwr[slot.index].add(slotPower);
+                        v2gDischargeEnergy[slot.index] = v2gDischargeEnergy[slot.index].subtract(energy); // negative kWh
+                        remaining = remaining.subtract(energy);
+                        rangeRevenue = rangeRevenue.add(energy.multiply(slot.price));
+                        dischargeSlotsUsed++;
+                    }
+
+                    totalDischargeRevenue = totalDischargeRevenue.add(rangeRevenue);
+
+                    if (steps != null) {
+                        steps.add(String.format("  [%s] Range %s~%s: V2G discharge %.2fkWh in %d slots, revenue=%.4f元 (SOC %d%%→%d%%)",
+                            dayLabel, range.startTime, range.endTime,
+                            dischargeEnergy.subtract(remaining).doubleValue(), dischargeSlotsUsed,
+                            rangeRevenue.doubleValue(), arrivalSoc, targetSoc));
+                    }
+
+                } else if (arrivalSoc < targetSoc) {
+                    // V2G vehicles need to charge in this range
+                    BigDecimal chargeNeeded = batteryKwh
+                        .multiply(new BigDecimal(targetSoc - arrivalSoc))
+                        .divide(BD_100, 4, RoundingMode.HALF_UP)
+                        .multiply(new BigDecimal(v2gVehicleCount));
+
+                    // Charge at cheapest slots in this range
+                    List<SlotData> cheapSlots = rangeSlots.stream()
+                        .sorted(Comparator.comparing(s -> s.price))
+                        .collect(Collectors.toList());
+
+                    remaining = chargeNeeded;
+                    BigDecimal rangeCost = BigDecimal.ZERO;
+
+                    for (SlotData slot : cheapSlots) {
+                        if (remaining.compareTo(BigDecimal.ZERO) <= 0) break;
+                        BigDecimal energy = remaining.min(v2gMaxChargePerSlot);
+                        // Power = rated V2G charge power (not energy/interval)
+                        v2gChargePwr[slot.index] = v2gChargePwr[slot.index].add(v2gChargePowerKw);
+                        v2gChargeEnergy[slot.index] = v2gChargeEnergy[slot.index].add(energy); // actual kWh
+                        remaining = remaining.subtract(energy);
+                        rangeCost = rangeCost.add(energy.multiply(slot.price));
+                    }
+
+                    totalChargeCost = totalChargeCost.add(rangeCost);
+
+                    if (steps != null) {
+                        steps.add(String.format("  [%s] Range %s~%s: V2G charge %.2fkWh, cost=%.4f元 (SOC %d%%→%d%%)",
+                            dayLabel, range.startTime, range.endTime,
+                            chargeNeeded.doubleValue(), rangeCost.doubleValue(), arrivalSoc, targetSoc));
+                    }
+                } else {
+                    if (steps != null) {
+                        steps.add(String.format("  [%s] Range %s~%s: V2G idle (SOC %d%% = target %d%%)",
+                            dayLabel, range.startTime, range.endTime, arrivalSoc, targetSoc));
+                    }
+                }
+
+                v2gSocPercent = targetSoc;
+            }
+
+            BigDecimal dailyArbitrage = totalDischargeRevenue.subtract(totalChargeCost)
+                .setScale(2, RoundingMode.HALF_UP);
+
+            if (steps != null) {
+                steps.add(String.format("  [%s] V2G daily summary: revenue=%.4f元 - charge cost=%.4f元 = arbitrage %.2f元",
+                    dayLabel, totalDischargeRevenue.doubleValue(), totalChargeCost.doubleValue(),
+                    dailyArbitrage.doubleValue()));
+            }
+
+            // Build curve: power=rated, energy=actual kWh
+            List<LoadCurvePoint> curve = new ArrayList<>();
+            for (int i = 0; i < slotsPerDay; i++) {
+                BigDecimal totalChargePower = v1gPower[i].add(v2gChargePwr[i]);
+                BigDecimal totalChargeEnergy = v1gEnergy[i].add(v2gChargeEnergy[i]);
+                curve.add(new LoadCurvePoint(
+                    slotIndexToTime(i, intervalMin), totalChargePower, v2gDischargePwr[i],
+                    totalChargeEnergy, v2gDischargeEnergy[i]));
+            }
+            return new V2gDayCurveResult(curve, dailyArbitrage, dailyArbitrage.compareTo(BigDecimal.ZERO) > 0);
+        }
+
+        // V2G vehicle count = 0 or no ranges: V1G-only curve
+        List<LoadCurvePoint> curve = new ArrayList<>();
+        for (int i = 0; i < slotsPerDay; i++) {
+            curve.add(new LoadCurvePoint(
+                slotIndexToTime(i, intervalMin), v1gPower[i], BigDecimal.ZERO,
+                v1gEnergy[i], BigDecimal.ZERO));
+        }
+        return new V2gDayCurveResult(curve, BigDecimal.ZERO, false);
+    }
+
+    /** Find peak discharge power across all points (now stored as negative; return absolute value) */
+    BigDecimal findPeakDischargePower(List<LoadCurvePoint> curve) {
+        BigDecimal minVal = BigDecimal.ZERO; // most negative
+        for (LoadCurvePoint p : curve) {
+            BigDecimal d = p.getDischargePowerKw() != null ? p.getDischargePowerKw() : BigDecimal.ZERO;
+            if (d.compareTo(minVal) < 0) minVal = d;
+        }
+        return minVal.abs();
+    }
+
+    /** Calculate max daily discharge energy across all days (discharge values are negative) */
+    BigDecimal calculateDailyDischargeEnergy(Map<String, List<LoadCurvePoint>> dailyCurves) {
+        BigDecimal intervalHours = new BigDecimal(config.getTimeSlotIntervalMinutes())
+            .divide(new BigDecimal("60"), 4, RoundingMode.HALF_UP);
+        BigDecimal maxEnergy = BigDecimal.ZERO;
+        for (List<LoadCurvePoint> dayCurve : dailyCurves.values()) {
+            BigDecimal dayEnergy = BigDecimal.ZERO;
+            for (LoadCurvePoint p : dayCurve) {
+                // Use actual discharge energy if available (dischargeEnergyKwh is negative)
+                if (p.getDischargeEnergyKwh() != null && p.getDischargeEnergyKwh().compareTo(BigDecimal.ZERO) < 0) {
+                    dayEnergy = dayEnergy.add(p.getDischargeEnergyKwh().abs());
+                } else {
+                    BigDecimal d = p.getDischargePowerKw() != null ? p.getDischargePowerKw() : BigDecimal.ZERO;
+                    dayEnergy = dayEnergy.add(d.abs().multiply(intervalHours));
+                }
+            }
+            if (dayEnergy.compareTo(maxEnergy) > 0) maxEnergy = dayEnergy;
+        }
+        return maxEnergy.setScale(2, RoundingMode.HALF_UP);
+    }
+
+    /**
+     * Standalone V2G calculation — all parameters from request body.
+     */
+    public V2gCalculationResultDTO calculateV2g(V2gCalculationRequestDTO request) {
+        List<String> steps = new ArrayList<>();
+
+        int vehicleCount = request.getVehicleCount() != null ? request.getVehicleCount() : 0;
+        BigDecimal batteryKwh = request.getBatteryCapacityKwh() != null ? request.getBatteryCapacityKwh() : BigDecimal.ZERO;
+        boolean enableTimeControl = request.getEnableTimeControl() != null ? request.getEnableTimeControl() : true;
+
+        int fast = request.getFastChargers() != null ? request.getFastChargers() : 0;
+        int slow = request.getSlowChargers() != null ? request.getSlowChargers() : 0;
+        int ultra = request.getUltraFastChargers() != null ? request.getUltraFastChargers() : 0;
+        int fastV2g = request.getFastChargersV2g() != null ? request.getFastChargersV2g() : 0;
+        int slowV2g = request.getSlowChargersV2g() != null ? request.getSlowChargersV2g() : 0;
+        int ultraV2g = request.getUltraFastChargersV2g() != null ? request.getUltraFastChargersV2g() : 0;
+        int totalV2gPiles = fastV2g + slowV2g + ultraV2g;
+
+        // Parse TOU prices from request
+        List<TouPricePeriod> touPrices = new ArrayList<>();
+        if (request.getTouPrices() != null) {
+            for (V2gCalculationRequestDTO.TouPriceEntry entry : request.getTouPrices()) {
+                List<int[]> ranges = new ArrayList<>();
+                if (entry.getTimeRanges() != null) {
+                    for (V2gCalculationRequestDTO.TimeRangeEntry tr : entry.getTimeRanges()) {
+                        if (tr.getStart() != null && tr.getEnd() != null) {
+                            ranges.add(new int[]{timeToMinutes(tr.getStart()), timeToMinutes(tr.getEnd())});
+                        }
+                    }
+                }
+                touPrices.add(new TouPricePeriod(entry.getPeriodType(), ranges, entry.getPrice()));
+            }
+        }
+
+        // Suggest pile configuration
+        int[] suggested = suggestPileConfiguration(vehicleCount);
+        steps.add(String.format("Pile suggestion: fast=%d, slow=%d, ultra=%d (for %d vehicles)",
+            suggested[0], suggested[1], suggested[2], vehicleCount));
+
+        // Resolve discharge power ratio from request or config
+        BigDecimal derateFactor = request.getDischargePowerRatio() != null
+            ? request.getDischargePowerRatio()
+            : config.getV2gDischargePowerDerateFactor();
+
+        // Calculate V1G and V2G power
+        BigDecimal totalChargePower = calculateTotalChargingPower(fast, slow, ultra, vehicleCount);
+        steps.add(String.format("Total charging power: %.0fkW, discharge power ratio: %.0f%%",
+            totalChargePower.doubleValue(), derateFactor.multiply(new BigDecimal("100")).doubleValue()));
+
+        DailyLoadCurveResult curveResult;
+
+        if (totalV2gPiles > 0) {
+            BigDecimal v2gDischargePower = calculateTotalV2gDischargePower(fastV2g, slowV2g, ultraV2g, vehicleCount, derateFactor);
+            BigDecimal v2gChargePower = calculateTotalChargingPower(fastV2g, slowV2g, ultraV2g, vehicleCount);
+            BigDecimal v1gChargePower = calculateTotalChargingPower(
+                fast - fastV2g, slow - slowV2g, ultra - ultraV2g,
+                Math.max(0, vehicleCount - totalV2gPiles));
+
+            steps.add(String.format("V2G enabled: V1G charge=%.0fkW, V2G charge=%.0fkW, V2G discharge=%.0fkW (derate=%.0f%%)",
+                v1gChargePower.doubleValue(), v2gChargePower.doubleValue(), v2gDischargePower.doubleValue(),
+                derateFactor.multiply(new BigDecimal("100")).doubleValue()));
+
+            curveResult = calculateLoadCurveWithV2g(
+                request.getWeeklySchedule(), touPrices, vehicleCount, batteryKwh, enableTimeControl,
+                v1gChargePower, v2gChargePower, v2gDischargePower, totalV2gPiles, steps);
+        } else {
+            curveResult = calculateLoadCurve(
+                request.getWeeklySchedule(), touPrices, vehicleCount, batteryKwh, enableTimeControl,
+                totalChargePower, steps);
+        }
+
+        BigDecimal weeklyArbitrage = curveResult.weeklyArbitrageSum.setScale(2, RoundingMode.HALF_UP);
+
+        // Peak discharge power = rated V2G pile discharge capability (not curve-derived)
+        // The curve shows actual per-slot usage (energy-limited), but peak power is the pile's rated capacity.
+        BigDecimal peakDischarge = totalV2gPiles > 0
+            ? calculateTotalV2gDischargePower(fastV2g, slowV2g, ultraV2g, vehicleCount, derateFactor)
+            : BigDecimal.ZERO;
+        BigDecimal dailyDischargeEnergy = calculateDailyDischargeEnergy(curveResult.dailyCurves);
+
+        steps.add(String.format("Peak discharge power (rated) = %.0fkW (pile capability × derate)", peakDischarge.doubleValue()));
+        steps.add(String.format("Weekly arbitrage = %.2f元, Yearly = %.2f元",
+            weeklyArbitrage.doubleValue(),
+            weeklyArbitrage.multiply(new BigDecimal("52")).doubleValue()));
+
+        return V2gCalculationResultDTO.builder()
+            .suggestedFastChargers(suggested[0])
+            .suggestedSlowChargers(suggested[1])
+            .suggestedUltraFastChargers(suggested[2])
+            .dailyLoadCurves(curveResult.dailyCurves)
+            .maxEnvelopeCurve(curveResult.maxEnvelopeCurve)
+            .peakChargingPowerKw(curveResult.peakPowerKw)
+            .peakDischargePowerKw(peakDischarge)
+            .dailyMaxChargingEnergyKwh(curveResult.dailyMaxEnergyKwh)
+            .dailyMaxDischargeEnergyKwh(dailyDischargeEnergy)
+            .weeklyArbitrageRevenue(weeklyArbitrage)
+            .yearlyArbitrageRevenue(weeklyArbitrage.multiply(new BigDecimal("52")).setScale(2, RoundingMode.HALF_UP))
+            .dischargePowerRatio(derateFactor)
+            .pAllLoadMax(curveResult.peakPowerKw)
+            .calculationSteps(steps)
+            .build();
+    }
+
+    /**
+     * Project-based V2G calculation — loads all params from DB.
+     */
+    public V2gCalculationResultDTO calculateV2gForProject(Long projectId) {
+        V2gVehicleConfig v2gEntity = v2gConfigRepository.findByProjectId(projectId)
+            .orElseThrow(() -> new IllegalArgumentException("V2G vehicle config is required."));
+        List<ProjectElectricityPrice> priceEntities = priceRepository.findByProjectId(projectId);
+        if (priceEntities.isEmpty()) {
+            throw new IllegalArgumentException("TOU electricity prices are required.");
+        }
+        List<V2gVehicleConfigDTO.WeeklyScheduleEntry> weeklySchedule = parseWeeklySchedule(v2gEntity);
+
+        // Build request from DB data
+        V2gCalculationRequestDTO request = V2gCalculationRequestDTO.builder()
+            .vehicleCount(v2gEntity.getVehicleCount())
+            .batteryCapacityKwh(v2gEntity.getBatteryCapacityKwh())
+            .enableTimeControl(v2gEntity.getEnableTimeControl())
+            .weeklySchedule(weeklySchedule)
+            .fastChargers(v2gEntity.getFastChargers())
+            .slowChargers(v2gEntity.getSlowChargers())
+            .ultraFastChargers(v2gEntity.getUltraFastChargers())
+            .fastChargersV2g(v2gEntity.getFastChargersV2g())
+            .slowChargersV2g(v2gEntity.getSlowChargersV2g())
+            .ultraFastChargersV2g(v2gEntity.getUltraFastChargersV2g())
+            .build();
+
+        // Convert TOU prices
+        List<V2gCalculationRequestDTO.TouPriceEntry> touEntries = new ArrayList<>();
+        for (ProjectElectricityPrice pe : priceEntities) {
+            List<V2gCalculationRequestDTO.TimeRangeEntry> ranges = new ArrayList<>();
+            if (pe.getTimeRanges() != null) {
+                try {
+                    List<Map<String, String>> rawRanges = objectMapper.readValue(
+                        pe.getTimeRanges(), new TypeReference<List<Map<String, String>>>() {});
+                    for (Map<String, String> r : rawRanges) {
+                        ranges.add(new V2gCalculationRequestDTO.TimeRangeEntry(r.get("start"), r.get("end")));
+                    }
+                } catch (JsonProcessingException e) {
+                    log.warn("Failed to parse time ranges: {}", e.getMessage());
+                }
+            }
+            touEntries.add(new V2gCalculationRequestDTO.TouPriceEntry(pe.getPeriodType(), ranges, pe.getPrice()));
+        }
+        request.setTouPrices(touEntries);
+
+        return calculateV2g(request);
+    }
+
     // ==================== Internal helpers ====================
 
     /** Aggregated result of per-day load curve calculations */
@@ -846,15 +1503,60 @@ public class StorageCalculationService {
         BigDecimal peakPowerKw;
         /** Maximum daily energy consumption across all days (kWh) */
         BigDecimal dailyMaxEnergyKwh;
+        /** Max daily V2G arbitrage revenue across all days (0 if V1G-only) */
+        BigDecimal maxDailyArbitrage;
+        /** Weekly sum of all days' arbitrage (0 if V1G-only) */
+        BigDecimal weeklyArbitrageSum;
 
         DailyLoadCurveResult(Map<String, List<LoadCurvePoint>> dailyCurves,
                              List<LoadCurvePoint> maxEnvelopeCurve,
                              BigDecimal peakPowerKw,
                              BigDecimal dailyMaxEnergyKwh) {
+            this(dailyCurves, maxEnvelopeCurve, peakPowerKw, dailyMaxEnergyKwh, BigDecimal.ZERO, BigDecimal.ZERO);
+        }
+
+        DailyLoadCurveResult(Map<String, List<LoadCurvePoint>> dailyCurves,
+                             List<LoadCurvePoint> maxEnvelopeCurve,
+                             BigDecimal peakPowerKw,
+                             BigDecimal dailyMaxEnergyKwh,
+                             BigDecimal maxDailyArbitrage,
+                             BigDecimal weeklyArbitrageSum) {
             this.dailyCurves = dailyCurves;
             this.maxEnvelopeCurve = maxEnvelopeCurve;
             this.peakPowerKw = peakPowerKw;
             this.dailyMaxEnergyKwh = dailyMaxEnergyKwh;
+            this.maxDailyArbitrage = maxDailyArbitrage;
+            this.weeklyArbitrageSum = weeklyArbitrageSum;
+        }
+    }
+
+    /** Result of a single day's V2G curve calculation */
+    static class V2gDayCurveResult {
+        List<LoadCurvePoint> curve;
+        BigDecimal dailyArbitrage;
+        boolean dischargeProfitable;
+
+        V2gDayCurveResult(List<LoadCurvePoint> curve, BigDecimal dailyArbitrage, boolean dischargeProfitable) {
+            this.curve = curve;
+            this.dailyArbitrage = dailyArbitrage;
+            this.dischargeProfitable = dischargeProfitable;
+        }
+    }
+
+    /** Per-range info for V2G SOC tracking */
+    static class RangeInfo {
+        int startSlot;
+        int endSlot;
+        int minSocPercent;
+        String startTime;
+        String endTime;
+
+        RangeInfo(int startSlot, int endSlot, int minSocPercent, String startTime, String endTime) {
+            this.startSlot = startSlot;
+            this.endSlot = endSlot;
+            this.minSocPercent = minSocPercent;
+            this.startTime = startTime;
+            this.endTime = endTime;
         }
     }
 

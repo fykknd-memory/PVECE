@@ -44,6 +44,18 @@ public class StorageCalculationConfig {
     /** ESS annual maintenance cost ratio (of initial investment) */
     private BigDecimal essAnnualMaintenanceRatio = new BigDecimal("0.02");
 
+    /** V2G round-trip efficiency (charge→discharge cycle loss). Default 85% */
+    private BigDecimal v2gRoundTripEfficiency = new BigDecimal("0.85");
+
+    /** V2G discharge depth — fraction of battery capacity available for discharge (target SOC - departure SOC). Default 20% (e.g. 80% target - 60% departure) */
+    private BigDecimal v2gDischargeDepthPercent = new BigDecimal("0.20");
+
+    /** V2G discharge power derate vs charging (inverter limit). Default 85% */
+    private BigDecimal v2gDischargePowerDerateFactor = new BigDecimal("0.85");
+
+    /** Pile suggestion ratios: [fast%, slow%, ultraFast%] */
+    private double[] pileSuggestionRatios = {0.3, 0.6, 0.1};
+
     /**
      * Standard transformer capacities by country (kVA).
      * If not configured, defaults are provided here.

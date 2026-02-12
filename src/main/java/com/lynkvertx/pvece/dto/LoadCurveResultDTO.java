@@ -32,6 +32,18 @@ public class LoadCurveResultDTO {
     /** Maximum daily energy consumption across all days in kWh */
     private BigDecimal dailyEnergyKwh;
 
+    /** V2G daily discharge energy in kWh */
+    private BigDecimal dailyDischargeEnergyKwh;
+
+    /** V2G peak discharge power in kW */
+    private BigDecimal peakDischargePowerKw;
+
+    /** V2G daily arbitrage revenue */
+    private BigDecimal dailyArbitrageRevenue;
+
+    /** Whether V2G is enabled (any V2G piles configured) */
+    private boolean v2gEnabled;
+
     /** Step-by-step calculation debug info */
     private List<String> calculationSteps;
 }

@@ -54,6 +54,15 @@ public class V2gVehicleConfig {
     @Column(name = "ultra_fast_chargers")
     private Integer ultraFastChargers;
 
+    @Column(name = "fast_chargers_v2g")
+    private Integer fastChargersV2g;
+
+    @Column(name = "slow_chargers_v2g")
+    private Integer slowChargersV2g;
+
+    @Column(name = "ultra_fast_chargers_v2g")
+    private Integer ultraFastChargersV2g;
+
     @CreationTimestamp
     @Column(name = "created_at", updatable = false)
     private LocalDateTime createdAt;

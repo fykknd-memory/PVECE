@@ -50,6 +50,9 @@ public class V2gVehicleConfigService {
         config.setFastChargers(dto.getFastChargers());
         config.setSlowChargers(dto.getSlowChargers());
         config.setUltraFastChargers(dto.getUltraFastChargers());
+        config.setFastChargersV2g(dto.getFastChargersV2g());
+        config.setSlowChargersV2g(dto.getSlowChargersV2g());
+        config.setUltraFastChargersV2g(dto.getUltraFastChargersV2g());
 
         try {
             config.setWeeklySchedule(
@@ -103,6 +106,9 @@ public class V2gVehicleConfigService {
             .fastChargers(entity.getFastChargers())
             .slowChargers(entity.getSlowChargers())
             .ultraFastChargers(entity.getUltraFastChargers())
+            .fastChargersV2g(entity.getFastChargersV2g())
+            .slowChargersV2g(entity.getSlowChargersV2g())
+            .ultraFastChargersV2g(entity.getUltraFastChargersV2g())
             .build();
     }
 }
